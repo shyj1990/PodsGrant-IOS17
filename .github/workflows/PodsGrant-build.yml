@@ -1,0 +1,60 @@
+# PodsGrant（含 iOS17 修复）构建工作流 —— 产出 Relaxin 可用的 rootless deb
+# 源码来源：LNSSPsd/PodsGrant 的 main 分支（含 fix ios17 addr offset，版本 0.5.5~prerelease3）
+#
+# 为什么要这样编：
+#   Relaxin 属 RootHide 架构。正确流程是「rootless 编译 → RootHide Patcher 转装」。
+#   官方 theos 没有 THEOS_PACKAGE_SCHEME=roothide 这个方案（那是 roothide/theos 分支才有），
+#   所以这里只出 rootless(iphoneos-arm64) 包，不需要也不应该用 roothide scheme。
+#
+# 用法：
+#   1) Fork 一份 LNSSPsd/PodsGrant 到自己账号
+#   2) 把本文件放到 Fork 的 .github/workflows/ 下（文件名任意，如 build.yml）
+#   3) Actions 页手动 Run workflow
+#   4) 跑完下载 Artifact「podsgrant-rootless」，取出 .deb
+#   5) 分享该 deb → RootHide Patcher → Convert .deb → 点 Sileo 安装 → respring
+
+name: Build PodsGrant (rootless for Relaxin)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Cache theos
+        id: cache-theos
+        uses: actions/cache@v6
+        with:
+          key: pg-theos-cache1
+          path: ~/theos
+
+      - name: Install theos, etc.
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/theos/theos.git -q --depth 1 --recursive ~/theos
+          cd ~/theos && rm -rf sdks && git clone https://github.com/theos/sdks.git -q --depth 1
+          curl -sL https://github.com/kabiroberai/swift-toolchain-linux/releases/download/v2.3.0/swift-5.8-ubuntu20.04.tar.xz | tar -xJf - -C ~/theos/toolchain/
+          sed -i 's/$(ECHO_MERGING)$(ECHO_UNBUFFERED)$(TARGET_LIPO) $(foreach ARCH,$(TARGET_ARCHS),-arch $(ARCH) $(THEOS_OBJ_DIR)\/$(ARCH)\/$(1)) -create -output "$$@"$(ECHO_END)/\0\nifeq ($(THEOS_PACKAGE_SCHEME),rootless)\nifneq ($(filter arm64e,$(TARGET_ARCHS)),)\n\t~\/theos\/allemande\/allemande "$$@"\nendif\nendif/' ~/theos/makefiles/instance/rules.mk
+          cd ~/theos && git clone https://github.com/p0358/allemande --depth 1 && cd allemande && g++ -std=c++20 -o allemande main.cpp
+
+      - name: Build rootless package
+        run: |
+          export THEOS=~/theos
+          make -j2 package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v7
+        with:
+          name: podsgrant-rootless
+          path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 7
