@@ -2,14 +2,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#include <errno.h>
 
 unsigned char PGS_global_os_ver=0;
 
+// ---- 诊断日志：写到 /tmp/pgs_general.log（在 tweak 与设置 bundle 两侧都会打印）----
+static void pgs_log2(const char *fmt, ...) {
+	FILE *lf = fopen("/tmp/pgs_general.log", "a");
+	if(!lf) return;
+	va_list ap; va_start(ap, fmt); vfprintf(lf, fmt, ap); va_end(ap);
+	fputc('\n', lf);
+	fclose(lf);
+}
+
 int PGS_saveSettings(struct podsgrant_settings *configuration) {
+	pgs_log2("[SAVE] attempt path=%s", PGS_SETTINGS_FILE);
 	FILE *config_file=fopen(PGS_SETTINGS_FILE, "wb");
 	if(!config_file) {
+		pgs_log2("[SAVE] FAIL path=%s errno=%d", PGS_SETTINGS_FILE, errno);
 		return -1;
 	}
+	char rp[4096];
+	if(realpath(PGS_SETTINGS_FILE, rp)) pgs_log2("[SAVE] OK realpath=%s", rp);
+	else pgs_log2("[SAVE] OK (realpath unavailable)");
 	fputc(configuration->is_tweak_enabled, config_file);
 	fputc(configuration->product_id_mapping_cnt, config_file);
 	fwrite(configuration->product_id_mapping, sizeof(struct product_id_map_entry_custom), configuration->product_id_mapping_cnt, config_file);
@@ -18,9 +34,11 @@ int PGS_saveSettings(struct podsgrant_settings *configuration) {
 	if(ferror(config_file)!=0) {
 		fclose(config_file);
 		remove(PGS_SETTINGS_FILE);
+		pgs_log2("[SAVE] ferror -> removed");
 		return -3;
 	}
 	fclose(config_file);
+	pgs_log2("[SAVE] done entries=%d", configuration->product_id_mapping_cnt);
 	return 0;
 }
 
@@ -29,14 +47,19 @@ struct podsgrant_settings *PGS_readSettings_to(struct podsgrant_settings *config
 	configuration->is_managed_structure=0;
 	configuration->product_id_mapping_cnt=0;
 	configuration->address_mapping_cnt=0;
+	pgs_log2("[READ] attempt path=%s", PGS_SETTINGS_FILE);
 	FILE *config_file=fopen(PGS_SETTINGS_FILE, "rb");
 	if(!config_file) {
 		// No configuration, use default
+		pgs_log2("[READ] FAIL path=%s errno=%d (no config, use default)", PGS_SETTINGS_FILE, errno);
 		configuration->is_tweak_enabled=1;
 		configuration->product_id_mapping=NULL;
 		configuration->address_mapping=NULL;
 		return configuration;
 	}
+	char rp[4096];
+	if(realpath(PGS_SETTINGS_FILE, rp)) pgs_log2("[READ] OK realpath=%s", rp);
+	else pgs_log2("[READ] OK (realpath unavailable)");
 	configuration->is_tweak_enabled=fgetc(config_file);
 	if(!configuration->is_tweak_enabled&&!read_full_anyway) {
 		configuration->product_id_mapping=NULL;
@@ -56,6 +79,7 @@ struct podsgrant_settings *PGS_readSettings_to(struct podsgrant_settings *config
 			configuration->product_id_mapping=NULL;
 			configuration->address_mapping=NULL;
 			remove(PGS_SETTINGS_FILE);
+			pgs_log2("[READ] ferror -> removed");
 			return configuration;
 		}
 	}else{
@@ -74,12 +98,14 @@ struct podsgrant_settings *PGS_readSettings_to(struct podsgrant_settings *config
 			configuration->product_id_mapping=NULL;
 			configuration->address_mapping=NULL;
 			remove(PGS_SETTINGS_FILE);
+			pgs_log2("[READ] ferror -> removed");
 			return configuration;
 		}
 	}else{
 		configuration->address_mapping=NULL;
 	}
 	fclose(config_file);
+	pgs_log2("[READ] done entries=%d", product_id_mapping_entries);
 	return configuration;
 }
 
@@ -258,4 +284,3 @@ int PGS_findAddresses(uint64_t *addresses,uint32_t *product_id_offset) {
 	fclose(bin);
 	return 1;
 }
-
