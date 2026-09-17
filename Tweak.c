@@ -44,9 +44,9 @@ static void pgs_log(const char *fmt, ...) {
 }
 
 // ---------------- 路径诊断 + 自动同步 ----------------
-// 复用 general.h 里的 PGS_SETTINGS_FILE（即 "/var/mobile/Library/Preferences/com.lns.pogr.bin"）。
-// roothide 会把"同一字面量"在不同进程里重定向到不同真实文件：设置 App 写一份、bluetoothd 读到另一份（空的）。
-// 这里逐个探测候选路径，找出"有数据的那份"，若比插件读的 canon 大就同步过去，让 PGS_readSettings 读到的就是它。
+// 复用 general.h 里的 PGS_SETTINGS_FILE。0.5.5 改路径后它指向 /var/mobile/Library/com.lns.pogr.bin
+// （移出被 Apple 沙箱禁止访问的 Preferences/ 子目录，bluetoothd 与设置 App 都能读写）。
+// 这里逐个探测候选路径（含旧路径），找出"有数据的那份"，若比插件读的 canon 大就同步过去，自动迁移已有条目。
 static int pgs_copy_file(const char *src, const char *dst) {
 	FILE *in = fopen(src, "rb");
 	if (!in) return -1;
@@ -67,16 +67,23 @@ static void pgs_diag_and_fix_settings(void) {
 	const char *canon = PGS_SETTINGS_FILE;
 	pgs_log("PGS_SETTINGS_FILE(canon)=%s", canon);
 
-	char c_home[PATH_MAX];
 	const char *home = getenv("HOME");
-	if (home && *home) snprintf(c_home, sizeof(c_home), "%s%s", home, canon);
 
-	const char *cands[6];
+	const char *cands[10];
 	int nc = 0;
-	cands[nc++] = canon;                                  // 插件读的（可能被重定向）
-	if (home && *home) cands[nc++] = c_home;              // $HOME + 同样子路径（jbroot 常见位置）
-	cands[nc++] = "/private/var/mobile/Library/Preferences/com.lns.pogr.bin"; // 真实路径的另一种写法
-	cands[nc++] = "/var/jb/var/mobile/Library/Preferences/com.lns.pogr.bin";  // 老式 jbroot 前缀
+	cands[nc++] = canon;                                                  // 新路径（插件真正读的位置）
+	// 以下都是"设置 App 可能实际写到的位置"，用于迁移已有条目到新路径
+	cands[nc++] = "/var/mobile/Library/Preferences/com.lns.pogr.bin";     // 旧路径（真实，设置 App 未沙箱时写这）
+	cands[nc++] = "/private/var/mobile/Library/Preferences/com.lns.pogr.bin";
+	cands[nc++] = "/var/jb/var/mobile/Library/Preferences/com.lns.pogr.bin";  // jbroot 副本
+	cands[nc++] = "/var/jb/var/mobile/Library/com.lns.pogr.bin";             // jbroot 的新路径副本
+	if (home && *home) {
+		char tmp[PATH_MAX];
+		snprintf(tmp, sizeof(tmp), "%s%s", home, canon);
+		cands[nc++] = strdup(tmp);                                        // $HOME + 新路径
+		snprintf(tmp, sizeof(tmp), "%s/var/mobile/Library/Preferences/com.lns.pogr.bin", home);
+		cands[nc++] = strdup(tmp);                                        // $HOME + 旧路径
+	}
 
 	long best_size = -1;
 	const char *best = NULL;
