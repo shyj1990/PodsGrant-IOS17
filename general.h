@@ -92,6 +92,14 @@ static const struct address_map_entry address_map[] = {
 #endif
 
 static const struct product_id_map_entry product_id_map_preset[] = {
+	// ==== 用户硬编码区（编译进二进制，不依赖 /tmp 文件、不依赖 UI Save、重启不丢）====
+	// PGS_patchProductId 是"从表头起、首个匹配即返回"，所以这三条放最前面，
+	// 一定优先于下面的作者官方预设。字段 = {原始PID, 目标PID, 最低iOS, 最高iOS}
+	{8212, 8211, 0, 255}, // AirPods Pro 2 (Lightning, 8212) -> AirPods 3 (8211)：用户曾连接/测试过的设备
+	{8219, 8211, 0, 255}, // AirPods 4 (ANC, 8219) -> AirPods 3 (8211)：用户真实主力设备
+	{8211, 8211, 0, 255}, // ★必须保留：hook 是"原地改写"，8212 改成 8211 后下次读到的 raw 就是 8211；
+	                      //   没有这条会被下面的官方预设 {8211,8207} 二次改写成 8207（级联）。
+	// ==== 以下为作者官方预设，勿动 ====
 	{8212, 8206, 0, 15},
 	{8217, 8207, 0, 255},
 	{8219, 8206, 0, 15}, // AirPods 4 (issue #73) -> AirPods Pro
