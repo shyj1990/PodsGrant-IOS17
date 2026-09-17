@@ -5,7 +5,9 @@
 // 与原版差异：仅新增日志与"路径探测/同步"，不改动任何 hook 逻辑。
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <limits.h>
