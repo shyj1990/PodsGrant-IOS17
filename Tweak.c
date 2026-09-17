@@ -1,12 +1,14 @@
-// PodsGrant Tweak.c —— 带完整调试日志版（用于定位 iOS17 上 custom product id mapping 不生效）
+// PodsGrant Tweak.c —— 调试 + 路径修复版（定位 iOS17 上 custom product id mapping 不生效）
 // 用法：用本文件整体替换 fork 仓库根目录的 Tweak.c，其余文件不动，然后跑 GitHub Actions 构建。
 // 日志会同时写到 /tmp/PodsGrant.log 和 /var/mobile/Library/PodsGrant.log（用 Filza 查看）。
 //
-// 与原版差异：仅新增日志，不改动任何 hook 逻辑。
+// 与原版差异：仅新增日志与"路径探测/同步"，不改动任何 hook 逻辑。
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <limits.h>
 #include <substrate.h>
 #include <mach-o/dyld.h>
 #include <sys/sysctl.h>
@@ -37,6 +39,76 @@ static void pgs_log(const char *fmt, ...) {
 			fclose(f);
 		}
 	}
+}
+
+// ---------------- 路径诊断 + 自动同步 ----------------
+// 复用 general.h 里的 PGS_SETTINGS_FILE（即 "/var/mobile/Library/Preferences/com.lns.pogr.bin"）。
+// roothide 会把"同一字面量"在不同进程里重定向到不同真实文件：设置 App 写一份、bluetoothd 读到另一份（空的）。
+// 这里逐个探测候选路径，找出"有数据的那份"，若比插件读的 canon 大就同步过去，让 PGS_readSettings 读到的就是它。
+static int pgs_copy_file(const char *src, const char *dst) {
+	FILE *in = fopen(src, "rb");
+	if (!in) return -1;
+	FILE *out = fopen(dst, "wb");
+	if (!out) { fclose(in); return -1; }
+	char buf[8192];
+	size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), in)) > 0) fwrite(buf, 1, n, out);
+	int ok = (ferror(in) || ferror(out)) ? -1 : 0;
+	fclose(in); fclose(out);
+	return ok;
+}
+
+static void pgs_diag_and_fix_settings(void) {
+	pgs_log("---- settings path diagnosis ----");
+	pgs_log("env HOME=%s", getenv("HOME") ? getenv("HOME") : "(null)");
+	pgs_log("env ROOT_PATH=%s", getenv("ROOT_PATH") ? getenv("ROOT_PATH") : "(null)");
+	const char *canon = PGS_SETTINGS_FILE;
+	pgs_log("PGS_SETTINGS_FILE(canon)=%s", canon);
+
+	char c_home[PATH_MAX];
+	const char *home = getenv("HOME");
+	if (home && *home) snprintf(c_home, sizeof(c_home), "%s%s", home, canon);
+
+	const char *cands[6];
+	int nc = 0;
+	cands[nc++] = canon;                                  // 插件读的（可能被重定向）
+	if (home && *home) cands[nc++] = c_home;              // $HOME + 同样子路径（jbroot 常见位置）
+	cands[nc++] = "/private/var/mobile/Library/Preferences/com.lns.pogr.bin"; // 真实路径的另一种写法
+	cands[nc++] = "/var/jb/var/mobile/Library/Preferences/com.lns.pogr.bin";  // 老式 jbroot 前缀
+
+	long best_size = -1;
+	const char *best = NULL;
+	for (int i = 0; i < nc; i++) {
+		struct stat st;
+		if (stat(cands[i], &st) == 0) {
+			char rp[PATH_MAX]; rp[0] = 0;
+			realpath(cands[i], rp);
+			pgs_log("cand[%d] %s EXISTS size=%lld realpath=%s",
+				i, cands[i], (long long)st.st_size, rp[0] ? rp : "?");
+			if ((long)st.st_size > best_size) { best_size = (long)st.st_size; best = cands[i]; }
+		} else {
+			pgs_log("cand[%d] %s MISSING(errno=%d)", i, cands[i], errno);
+		}
+	}
+
+	if (best && strcmp(best, canon) != 0) {
+		struct stat sc;
+		long canon_size = (stat(canon, &sc) == 0) ? (long)sc.st_size : -1;
+		if (best_size > canon_size) {
+			pgs_log("FIX: copy %s (%ld) -> %s (%ld)", best, best_size, canon, canon_size);
+			if (pgs_copy_file(best, canon) == 0)
+				pgs_log("FIX: copy OK");
+			else
+				pgs_log("FIX: copy FAILED (errno)");
+		} else {
+			pgs_log("skip copy: canon already has >= data (canon=%ld best=%ld)", canon_size, best_size);
+		}
+	} else if (!best) {
+		pgs_log("FIX: NO settings file found at any candidate path (settings app may write to a path this sandboxed process cannot reach)");
+	} else {
+		pgs_log("settings file already at canon with data, no copy needed");
+	}
+	pgs_log("---- end settings path diagnosis ----");
 }
 
 unsigned int (*orig_1002E1F9C)(void *a1, void *a2, void *a3, void *a4, void *a5);
@@ -113,6 +185,10 @@ static void __podsgrant_main_construct(void) {
 		}
 		pgs_log("target confirmed: bluetoothd");
 	}
+
+	// 路径诊断 + 自动同步（在真正读设置之前）
+	pgs_diag_and_fix_settings();
+
 	settings = PGS_readSettings(0);
 	pgs_log("settings: enabled=%d custom_map_cnt=%d addr_map_cnt=%d",
 			settings->is_tweak_enabled, settings->product_id_mapping_cnt, settings->address_mapping_cnt);
