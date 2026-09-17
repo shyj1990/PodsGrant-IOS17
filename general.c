@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 unsigned char PGS_global_os_ver=0;
 
