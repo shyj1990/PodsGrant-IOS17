@@ -120,7 +120,7 @@ struct podsgrant_settings {
 #define NSSTR(a) @a
 //(__bridge NSString *)__CFStringMakeConstantString(a)
 
-#define PGS_SETTINGS_FILE "/var/mobile/Library/Preferences/com.lns.pogr.bin"
+#define PGS_SETTINGS_FILE "/var/mobile/Library/com.lns.pogr.bin"
 
 uint16_t PGS_patchProductId(struct podsgrant_settings *conf, uint16_t original);
 
