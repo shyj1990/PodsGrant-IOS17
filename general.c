@@ -16,7 +16,21 @@ static void pgs_log2(const char *fmt, ...) {
 	fclose(lf);
 }
 
+static void pgs_mkdir_p2(const char *path) {
+	char tmp[4096];
+	strncpy(tmp, path, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = 0;
+	for (char *p = tmp + 1; *p; p++) {
+		if (*p == '/') {
+			*p = 0;
+			mkdir(tmp, 0755);
+			*p = '/';
+		}
+	}
+	mkdir(tmp, 0755);
+}
+
 int PGS_saveSettings(struct podsgrant_settings *configuration) {
+	pgs_mkdir_p2(PGS_SETTINGS_FILE);
 	pgs_log2("[SAVE] attempt path=%s", PGS_SETTINGS_FILE);
 	FILE *config_file=fopen(PGS_SETTINGS_FILE, "wb");
 	if(!config_file) {

@@ -43,21 +43,21 @@ static void pgs_log(const char *fmt, ...) {
 	}
 }
 
-// ---------------- 路径诊断 + 自动同步 ----------------
-// 复用 general.h 里的 PGS_SETTINGS_FILE。0.5.5 改路径后它指向 /var/mobile/Library/com.lns.pogr.bin
-// （移出被 Apple 沙箱禁止访问的 Preferences/ 子目录，bluetoothd 与设置 App 都能读写）。
-// 这里逐个探测候选路径（含旧路径），找出"有数据的那份"，若比插件读的 canon 大就同步过去，自动迁移已有条目。
-static int pgs_copy_file(const char *src, const char *dst) {
-	FILE *in = fopen(src, "rb");
-	if (!in) return -1;
-	FILE *out = fopen(dst, "wb");
-	if (!out) { fclose(in); return -1; }
-	char buf[8192];
-	size_t n;
-	while ((n = fread(buf, 1, sizeof(buf), in)) > 0) fwrite(buf, 1, n, out);
-	int ok = (ferror(in) || ferror(out)) ? -1 : 0;
-	fclose(in); fclose(out);
-	return ok;
+// ---------------- 路径诊断 + 目录准备 ----------------
+// roothide 下 bluetoothd 守护进程的沙箱禁止读取 /var/mobile/Library/（整个目录 EPERM，实测 errno=1），
+// 但注入后的 bluetoothd 与设置 App 都能访问 jbroot（/var/jb，dylib 就装在 /var/jb/Library/MobileSubstrate 下）。
+// 因此把共享设置文件放到 /var/jb/Library/PodsGrant/com.lns.pogr.bin，两边落到同一份。
+static void pgs_mkdir_p(const char *path) {
+	char tmp[PATH_MAX];
+	strncpy(tmp, path, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = 0;
+	for (char *p = tmp + 1; *p; p++) {
+		if (*p == '/') {
+			*p = 0;
+			mkdir(tmp, 0755);
+			*p = '/';
+		}
+	}
+	mkdir(tmp, 0755);
 }
 
 static void pgs_diag_and_fix_settings(void) {
@@ -67,55 +67,15 @@ static void pgs_diag_and_fix_settings(void) {
 	const char *canon = PGS_SETTINGS_FILE;
 	pgs_log("PGS_SETTINGS_FILE(canon)=%s", canon);
 
-	const char *home = getenv("HOME");
-
-	const char *cands[10];
-	int nc = 0;
-	cands[nc++] = canon;                                                  // 新路径（插件真正读的位置）
-	// 以下都是"设置 App 可能实际写到的位置"，用于迁移已有条目到新路径
-	cands[nc++] = "/var/mobile/Library/Preferences/com.lns.pogr.bin";     // 旧路径（真实，设置 App 未沙箱时写这）
-	cands[nc++] = "/private/var/mobile/Library/Preferences/com.lns.pogr.bin";
-	cands[nc++] = "/var/jb/var/mobile/Library/Preferences/com.lns.pogr.bin";  // jbroot 副本
-	cands[nc++] = "/var/jb/var/mobile/Library/com.lns.pogr.bin";             // jbroot 的新路径副本
-	if (home && *home) {
-		char tmp[PATH_MAX];
-		snprintf(tmp, sizeof(tmp), "%s%s", home, canon);
-		cands[nc++] = strdup(tmp);                                        // $HOME + 新路径
-		snprintf(tmp, sizeof(tmp), "%s/var/mobile/Library/Preferences/com.lns.pogr.bin", home);
-		cands[nc++] = strdup(tmp);                                        // $HOME + 旧路径
-	}
-
-	long best_size = -1;
-	const char *best = NULL;
-	for (int i = 0; i < nc; i++) {
-		struct stat st;
-		if (stat(cands[i], &st) == 0) {
-			char rp[PATH_MAX]; rp[0] = 0;
-			realpath(cands[i], rp);
-			pgs_log("cand[%d] %s EXISTS size=%lld realpath=%s",
-				i, cands[i], (long long)st.st_size, rp[0] ? rp : "?");
-			if ((long)st.st_size > best_size) { best_size = (long)st.st_size; best = cands[i]; }
-		} else {
-			pgs_log("cand[%d] %s MISSING(errno=%d)", i, cands[i], errno);
-		}
-	}
-
-	if (best && strcmp(best, canon) != 0) {
-		struct stat sc;
-		long canon_size = (stat(canon, &sc) == 0) ? (long)sc.st_size : -1;
-		if (best_size > canon_size) {
-			pgs_log("FIX: copy %s (%ld) -> %s (%ld)", best, best_size, canon, canon_size);
-			if (pgs_copy_file(best, canon) == 0)
-				pgs_log("FIX: copy OK");
-			else
-				pgs_log("FIX: copy FAILED (errno)");
-		} else {
-			pgs_log("skip copy: canon already has >= data (canon=%ld best=%ld)", canon_size, best_size);
-		}
-	} else if (!best) {
-		pgs_log("FIX: NO settings file found at any candidate path (settings app may write to a path this sandboxed process cannot reach)");
+	// 确保 jbroot 目录存在：bluetoothd 自己能写 /var/jb，这里先建好，设置 App 保存时才能落盘
+	pgs_mkdir_p(canon);
+	struct stat st;
+	if (stat(canon, &st) == 0) {
+		char rp[PATH_MAX]; rp[0] = 0;
+		realpath(canon, rp);
+		pgs_log("settings file EXISTS size=%lld realpath=%s", (long long)st.st_size, rp[0] ? rp : "?");
 	} else {
-		pgs_log("settings file already at canon with data, no copy needed");
+		pgs_log("settings file MISSING(errno=%d) at canon (settings app has not saved yet, or cannot write here)", errno);
 	}
 	pgs_log("---- end settings path diagnosis ----");
 }

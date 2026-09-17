@@ -120,7 +120,10 @@ struct podsgrant_settings {
 #define NSSTR(a) @a
 //(__bridge NSString *)__CFStringMakeConstantString(a)
 
-#define PGS_SETTINGS_FILE "/var/mobile/Library/com.lns.pogr.bin"
+// roothide 修复：bluetoothd 守护进程沙箱禁止读取 /var/mobile/Library/（整个目录 EPERM），
+// 但注入后的 bluetoothd 与设置 App 都能访问 jbroot（/var/jb，dylib 即装于此）。
+// 故把共享设置文件放到 jbroot 下，两边落到同一份。
+#define PGS_SETTINGS_FILE "/var/jb/Library/PodsGrant/com.lns.pogr.bin"
 
 uint16_t PGS_patchProductId(struct podsgrant_settings *conf, uint16_t original);
 
