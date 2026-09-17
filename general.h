@@ -120,10 +120,13 @@ struct podsgrant_settings {
 #define NSSTR(a) @a
 //(__bridge NSString *)__CFStringMakeConstantString(a)
 
-// roothide 修复：bluetoothd 守护进程沙箱禁止读取 /var/mobile/Library/（整个目录 EPERM），
-// 但注入后的 bluetoothd 与设置 App 都能访问 jbroot（/var/jb，dylib 即装于此）。
-// 故把共享设置文件放到 jbroot 下，两边落到同一份。
-#define PGS_SETTINGS_FILE "/var/jb/Library/PodsGrant/com.lns.pogr.bin"
+// roothide 修复（v3）：bluetoothd 守护进程沙箱禁止读取 /var/mobile/Library/（整个目录 EPERM），
+// 而 jbroot（/var/jb）是只读挂载，设置 App 往里写会失败（Save 静默失败→条目不持久化）。
+// 实测唯一"两边都能访问、且指向同一份真实文件"的位置是 /tmp：
+//   - bluetoothd 能把 PodsGrant.log 写进 /tmp 且用户在 Filza 里能看到 ⇒ 真实共享路径；
+//   - 设置 App（未对 /tmp 做 jbroot 重定向）写 /tmp/com.lns.pogr.bin 也在真实 /tmp。
+// 故把共享设置文件放到 /tmp。注意：/tmp 重启会清空，故 custom mapping 重启后需重设（后续可加持久化副本）。
+#define PGS_SETTINGS_FILE "/tmp/com.lns.pogr.bin"
 
 uint16_t PGS_patchProductId(struct podsgrant_settings *conf, uint16_t original);
 

@@ -45,8 +45,9 @@ static void pgs_log(const char *fmt, ...) {
 
 // ---------------- 路径诊断 + 目录准备 ----------------
 // roothide 下 bluetoothd 守护进程的沙箱禁止读取 /var/mobile/Library/（整个目录 EPERM，实测 errno=1），
-// 但注入后的 bluetoothd 与设置 App 都能访问 jbroot（/var/jb，dylib 就装在 /var/jb/Library/MobileSubstrate 下）。
-// 因此把共享设置文件放到 /var/jb/Library/PodsGrant/com.lns.pogr.bin，两边落到同一份。
+// 且 jbroot（/var/jb）是只读挂载，设置 App 往里写会失败。唯一两边都能访问、且指向同一份真实文件的位置是 /tmp
+// （bluetoothd 能把 PodsGrant.log 写进 /tmp 且用户在 Filza 能看到；设置 App 未被对 /tmp 做 jbroot 重定向）。
+// 共享设置文件 = /tmp/com.lns.pogr.bin（见 general.h 的 PGS_SETTINGS_FILE）。
 static void pgs_mkdir_p(const char *path) {
 	char tmp[PATH_MAX];
 	strncpy(tmp, path, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = 0;
