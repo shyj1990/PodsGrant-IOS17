@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 unsigned char PGS_global_os_ver=0;
 
@@ -17,22 +18,55 @@ static void pgs_log2(const char *fmt, ...) {
 	fclose(lf);
 }
 
-static void pgs_mkdir_p2(const char *path) {
-	char tmp[4096];
-	strncpy(tmp, path, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = 0;
-	for (char *p = tmp + 1; *p; p++) {
-		if (*p == '/') {
-			*p = 0;
-			mkdir(tmp, 0755);
-			*p = '/';
-		}
+// 重启后 /private/var/tmp 会被系统清空，所以设置文件另存一份镜像。
+// 只有设置 App（非沙箱）能读写它；bluetoothd 读会被沙箱拒绝（EPERM），故镜像只用于"重启后恢复"。
+#define PGS_MIRROR_FILE "/var/mobile/Library/com.lns.pogr.bin"
+
+// 历史 bug 残留：曾用 pgs_mkdir_p() 把"文件路径本身"当目录 mkdir，
+// 导致 /tmp/com.lns.pogr.bin 变成目录 → fopen(wb) 报 EISDIR(errno=21)。
+static void pgs_clear_stray_dir(const char *p) {
+	struct stat st;
+	if(stat(p, &st) == 0 && S_ISDIR(st.st_mode)) {
+		if(rmdir(p) == 0) pgs_log2("[FIX] removed stray directory at %s", p);
+		else pgs_log2("[FIX] %s is a directory, rmdir failed errno=%d", p, errno);
 	}
-	mkdir(tmp, 0755);
+}
+
+static int pgs_copy_file(const char *src, const char *dst) {
+	FILE *in = fopen(src, "rb");
+	if(!in) return -1;
+	FILE *out = fopen(dst, "wb");
+	if(!out) { fclose(in); return -1; }
+	char buf[8192];
+	size_t n;
+	while((n = fread(buf, 1, sizeof(buf), in)) > 0) fwrite(buf, 1, n, out);
+	int ok = (ferror(in) || ferror(out)) ? -1 : 0;
+	fclose(in); fclose(out);
+	return ok;
+}
+
+// 由设置 App 在被注入时调用：若共享路径不存在/为空，就把镜像拷回去。
+// （重启后 /tmp 被清空 → 打开一次"设置"即可让映射恢复，无需重新录入。）
+void PGS_restoreFromMirror(void) {
+	pgs_log2("[RESTORE] attempt share=%s mirror=%s", PGS_SETTINGS_FILE, PGS_MIRROR_FILE);
+	struct stat st;
+	if(stat(PGS_SETTINGS_FILE, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+		pgs_log2("[RESTORE] share file already present size=%lld, skip", (long long)st.st_size);
+		return;
+	}
+	pgs_clear_stray_dir(PGS_SETTINGS_FILE);
+	if(pgs_copy_file(PGS_MIRROR_FILE, PGS_SETTINGS_FILE) == 0) {
+		struct stat s2;
+		long long sz = (stat(PGS_SETTINGS_FILE, &s2) == 0) ? (long long)s2.st_size : -1;
+		pgs_log2("[RESTORE] OK mirror -> share size=%lld", sz);
+	} else {
+		pgs_log2("[RESTORE] FAIL (no mirror yet, or not permitted here, errno=%d)", errno);
+	}
 }
 
 int PGS_saveSettings(struct podsgrant_settings *configuration) {
-	pgs_mkdir_p2(PGS_SETTINGS_FILE);
-	pgs_log2("[SAVE] attempt path=%s", PGS_SETTINGS_FILE);
+	pgs_clear_stray_dir(PGS_SETTINGS_FILE);
+	pgs_log2("[SAVE] attempt path=%s entries=%d", PGS_SETTINGS_FILE, configuration->product_id_mapping_cnt);
 	FILE *config_file=fopen(PGS_SETTINGS_FILE, "wb");
 	if(!config_file) {
 		pgs_log2("[SAVE] FAIL path=%s errno=%d", PGS_SETTINGS_FILE, errno);
@@ -54,6 +88,11 @@ int PGS_saveSettings(struct podsgrant_settings *configuration) {
 	}
 	fclose(config_file);
 	pgs_log2("[SAVE] done entries=%d", configuration->product_id_mapping_cnt);
+	// 写镜像（仅设置 App 能成功；bluetoothd 调到这里会失败，无害）
+	if(pgs_copy_file(PGS_SETTINGS_FILE, PGS_MIRROR_FILE) == 0)
+		pgs_log2("[SAVE] mirror -> %s OK", PGS_MIRROR_FILE);
+	else
+		pgs_log2("[SAVE] mirror -> %s FAIL errno=%d (harmless)", PGS_MIRROR_FILE, errno);
 	return 0;
 }
 
@@ -62,6 +101,7 @@ struct podsgrant_settings *PGS_readSettings_to(struct podsgrant_settings *config
 	configuration->is_managed_structure=0;
 	configuration->product_id_mapping_cnt=0;
 	configuration->address_mapping_cnt=0;
+	pgs_clear_stray_dir(PGS_SETTINGS_FILE);
 	pgs_log2("[READ] attempt path=%s", PGS_SETTINGS_FILE);
 	FILE *config_file=fopen(PGS_SETTINGS_FILE, "rb");
 	if(!config_file) {
@@ -75,7 +115,16 @@ struct podsgrant_settings *PGS_readSettings_to(struct podsgrant_settings *config
 	char rp[4096];
 	if(realpath(PGS_SETTINGS_FILE, rp)) pgs_log2("[READ] OK realpath=%s", rp);
 	else pgs_log2("[READ] OK (realpath unavailable)");
-	configuration->is_tweak_enabled=fgetc(config_file);
+	int enabled_byte=fgetc(config_file);
+	if(enabled_byte==EOF) { // 空文件/坏文件：当作"无配置"，不要让 -1 被截成 255 变成垃圾条目数
+		fclose(config_file);
+		pgs_log2("[READ] empty/unreadable file -> treat as no config");
+		configuration->is_tweak_enabled=1;
+		configuration->product_id_mapping=NULL;
+		configuration->address_mapping=NULL;
+		return configuration;
+	}
+	configuration->is_tweak_enabled=(uint8_t)enabled_byte;
 	if(!configuration->is_tweak_enabled&&!read_full_anyway) {
 		configuration->product_id_mapping=NULL;
 		configuration->address_mapping=NULL;
@@ -93,8 +142,8 @@ struct podsgrant_settings *PGS_readSettings_to(struct podsgrant_settings *config
 			free(configuration->product_id_mapping);
 			configuration->product_id_mapping=NULL;
 			configuration->address_mapping=NULL;
+			pgs_log2("[READ] ferror -> removed (bad entries byte=%u)", product_id_mapping_entries);
 			remove(PGS_SETTINGS_FILE);
-			pgs_log2("[READ] ferror -> removed");
 			return configuration;
 		}
 	}else{
@@ -104,7 +153,7 @@ struct podsgrant_settings *PGS_readSettings_to(struct podsgrant_settings *config
 	configuration->address_mapping_cnt=addr_mapping_entries;
 	if(addr_mapping_entries) {
 		configuration->address_mapping=malloc((addr_mapping_entries)*sizeof(struct address_map_entry));
-		fread(configuration->address_mapping, sizeof(struct address_map_entry), addr_mapping_entries, config_file);
+		fread(configuration->address_mapping, sizeof(struct address_map_entry), addr_mapping_entries,config_file);
 		if(ferror(config_file)!=0) {
 			fclose(config_file);
 			configuration->is_tweak_enabled=0;
@@ -112,15 +161,15 @@ struct podsgrant_settings *PGS_readSettings_to(struct podsgrant_settings *config
 			free(configuration->address_mapping);
 			configuration->product_id_mapping=NULL;
 			configuration->address_mapping=NULL;
+			pgs_log2("[READ] ferror(addr) -> removed");
 			remove(PGS_SETTINGS_FILE);
-			pgs_log2("[READ] ferror -> removed");
 			return configuration;
 		}
 	}else{
 		configuration->address_mapping=NULL;
 	}
 	fclose(config_file);
-	pgs_log2("[READ] done entries=%d", product_id_mapping_entries);
+	pgs_log2("[READ] done enabled=%d entries=%d", configuration->is_tweak_enabled, product_id_mapping_entries);
 	return configuration;
 }
 

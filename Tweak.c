@@ -43,24 +43,13 @@ static void pgs_log(const char *fmt, ...) {
 	}
 }
 
-// ---------------- 路径诊断 + 目录准备 ----------------
-// roothide 下 bluetoothd 守护进程的沙箱禁止读取 /var/mobile/Library/（整个目录 EPERM，实测 errno=1），
-// 且 jbroot（/var/jb）是只读挂载，设置 App 往里写会失败。唯一两边都能访问、且指向同一份真实文件的位置是 /tmp
-// （bluetoothd 能把 PodsGrant.log 写进 /tmp 且用户在 Filza 能看到；设置 App 未被对 /tmp 做 jbroot 重定向）。
+// ---------------- 路径诊断 ----------------
+// roothide 下 bluetoothd 守护进程的沙箱禁止读取 /var/mobile/Library/（整个目录 EPERM，实测 errno=1）。
+// 实测唯一"两边都能访问、且 realpath 指向同一份真实文件"的位置是 /tmp
+// （bluetoothd 与设置 App 对 /tmp/com.lns.pogr.bin 都解析到 /private/var/tmp/com.lns.pogr.bin）。
 // 共享设置文件 = /tmp/com.lns.pogr.bin（见 general.h 的 PGS_SETTINGS_FILE）。
-static void pgs_mkdir_p(const char *path) {
-	char tmp[PATH_MAX];
-	strncpy(tmp, path, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = 0;
-	for (char *p = tmp + 1; *p; p++) {
-		if (*p == '/') {
-			*p = 0;
-			mkdir(tmp, 0755);
-			*p = '/';
-		}
-	}
-	mkdir(tmp, 0755);
-}
-
+// ⚠️ 绝对不要对这个"文件路径"调用 mkdir：上一版 pgs_mkdir_p() 把文件建成了目录，
+//    导致 fopen(...,"wb") 报 EISDIR(errno=21) → Save 永远失败；fopen(...,"rb") 能开目录但读到垃圾。
 static void pgs_diag_and_fix_settings(void) {
 	pgs_log("---- settings path diagnosis ----");
 	pgs_log("env HOME=%s", getenv("HOME") ? getenv("HOME") : "(null)");
@@ -68,15 +57,21 @@ static void pgs_diag_and_fix_settings(void) {
 	const char *canon = PGS_SETTINGS_FILE;
 	pgs_log("PGS_SETTINGS_FILE(canon)=%s", canon);
 
-	// 确保 jbroot 目录存在：bluetoothd 自己能写 /var/jb，这里先建好，设置 App 保存时才能落盘
-	pgs_mkdir_p(canon);
+	// 自愈：清掉历史 bug 留下的"同名目录"（/tmp 本身已存在，无需 mkdir）
 	struct stat st;
+	if (stat(canon, &st) == 0 && S_ISDIR(st.st_mode)) {
+		if (rmdir(canon) == 0)
+			pgs_log("[FIX] removed stray directory at canon (previous build's mkdir bug)");
+		else
+			pgs_log("[FIX] canon is a directory, rmdir failed errno=%d", errno);
+	}
 	if (stat(canon, &st) == 0) {
 		char rp[PATH_MAX]; rp[0] = 0;
 		realpath(canon, rp);
-		pgs_log("settings file EXISTS size=%lld realpath=%s", (long long)st.st_size, rp[0] ? rp : "?");
+		pgs_log("settings file EXISTS size=%lld regular=%d realpath=%s",
+				(long long)st.st_size, S_ISREG(st.st_mode), rp[0] ? rp : "?");
 	} else {
-		pgs_log("settings file MISSING(errno=%d) at canon (settings app has not saved yet, or cannot write here)", errno);
+		pgs_log("settings file MISSING(errno=%d) at canon (settings app has not saved yet)", errno);
 	}
 	pgs_log("---- end settings path diagnosis ----");
 }
@@ -149,7 +144,14 @@ static void __podsgrant_main_construct(void) {
 		_NSGetExecutablePath(exec_path, &len);
 		pgs_log("exec_path=%s", exec_path);
 		if (memcmp(exec_path, "/usr/sbin/bluetoothd", 21) != 0) {
-			pgs_log("NOT bluetoothd -> return (dylib injected into wrong process)");
+			pgs_log("NOT bluetoothd (dylib injected into: %s)", exec_path);
+			if (strstr(exec_path, "/Applications/Preferences.app/") != NULL) {
+				// 设置 App 被注入 —— 只有它能读写镜像文件（bluetoothd 沙箱禁读 /var/mobile/Library）
+				pgs_log("-> this is Settings app: restore share file from mirror if needed");
+				PGS_restoreFromMirror();
+			} else {
+				pgs_log("-> other process, nothing to do");
+			}
 			settings = NULL;
 			return;
 		}
